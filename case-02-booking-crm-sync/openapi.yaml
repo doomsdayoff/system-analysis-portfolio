@@ -1,0 +1,233 @@
+openapi: 3.0.3
+info:
+  title: Integration Layer – Booking / CRM Sync
+  description: |
+    Входящий API слоя интеграции между сервисом онлайн-записи и CRM.
+    Демонстрационный контракт на синтетических данных, названия систем условные.
+
+    Семантика доставки: источник повторяет доставку вебхука при любом ответе,
+    отличном от 2xx. Обработка идемпотентна по `event_id` – повторная доставка
+    уже обработанного события отвечает 200 без побочных эффектов.
+  version: 1.0.0
+servers:
+  - url: https://integration.example.com/v1
+    description: Демонстрационный адрес
+
+paths:
+  /webhooks/booking:
+    post:
+      summary: Событие от сервиса онлайн-записи
+      description: >
+        Создание, изменение или отмена записи в сервисе онлайн-записи.
+        Слой интеграции сопоставляет клиента по нормализованному телефону
+        и выполняет upsert записи в CRM по `external_id` источника.
+      operationId: handleBookingEvent
+      security:
+        - webhookSignature: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Event'
+            examples:
+              created:
+                summary: Новая запись
+                value:
+                  event_id: 6f1c1a1e-3b2d-4c8e-9f0a-2d5b7c8e9f0a
+                  event_type: appointment.created
+                  occurred_at: '2026-07-20T10:15:00+07:00'
+                  data:
+                    external_id: bk-102934
+                    source: booking
+                    starts_at: '2026-07-22T14:00:00+07:00'
+                    ends_at: '2026-07-22T14:30:00+07:00'
+                    status: scheduled
+                    doctor_external_id: doc-17
+                    branch_external_id: br-02
+                    updated_at: '2026-07-20T10:15:00+07:00'
+                    client:
+                      full_name: Иванова Анна Сергеевна
+                      phone: '+79990000000'
+      responses:
+        '200':
+          description: >
+            Событие обработано (в том числе повторная доставка уже
+            обработанного события – идемпотентно, без побочных эффектов).
+        '400':
+          description: Невалидная схема события; доставку повторять бессмысленно.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Невалидная подпись запроса.
+        '500':
+          description: Внутренняя ошибка; источник повторит доставку позже.
+
+  /webhooks/crm:
+    post:
+      summary: Событие из CRM
+      description: >
+        Изменение или отмена записи на стороне CRM. Слой интеграции
+        применяет правила владения полями и обновляет слот в сервисе записи.
+      operationId: handleCrmEvent
+      security:
+        - webhookSignature: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Event'
+      responses:
+        '200':
+          description: Событие обработано (идемпотентно по `event_id`).
+        '400':
+          description: Невалидная схема события.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Невалидная подпись запроса.
+        '500':
+          description: Внутренняя ошибка; источник повторит доставку позже.
+
+  /sync/appointments/{externalId}:
+    get:
+      summary: Состояние синхронизации записи
+      description: >
+        Служебный эндпоинт для поддержки: связка идентификаторов записи
+        в обоих контурах и отметка времени последней синхронизации.
+      operationId: getAppointmentSyncState
+      parameters:
+        - name: externalId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: source
+          in: query
+          required: true
+          description: Контур, которому принадлежит externalId.
+          schema:
+            type: string
+            enum: [booking, crm]
+      responses:
+        '200':
+          description: Связка найдена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncState'
+        '404':
+          description: Запись с таким идентификатором не синхронизировалась.
+
+components:
+  securitySchemes:
+    webhookSignature:
+      type: apiKey
+      in: header
+      name: X-Signature
+      description: HMAC-SHA256 от тела запроса на общем секрете.
+
+  schemas:
+    Event:
+      type: object
+      required: [event_id, event_type, occurred_at, data]
+      properties:
+        event_id:
+          type: string
+          format: uuid
+          description: Уникальный идентификатор доставки – ключ идемпотентности.
+        event_type:
+          type: string
+          enum:
+            - appointment.created
+            - appointment.updated
+            - appointment.cancelled
+        occurred_at:
+          type: string
+          format: date-time
+        data:
+          $ref: '#/components/schemas/Appointment'
+
+    Appointment:
+      type: object
+      required: [external_id, source, starts_at, ends_at, status, updated_at, client]
+      properties:
+        external_id:
+          type: string
+          description: Идентификатор записи в системе-источнике.
+        source:
+          type: string
+          enum: [booking, crm]
+        starts_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [scheduled, confirmed, cancelled, no_show, completed]
+        doctor_external_id:
+          type: string
+        branch_external_id:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+          description: Используется при разрешении конфликтов версий.
+        comment:
+          type: string
+        client:
+          $ref: '#/components/schemas/Client'
+
+    Client:
+      type: object
+      required: [phone]
+      properties:
+        external_id:
+          type: string
+        full_name:
+          type: string
+        phone:
+          type: string
+          description: Телефон в произвольном формате; нормализуется к E.164 до сопоставления.
+        email:
+          type: string
+          format: email
+
+    SyncState:
+      type: object
+      properties:
+        booking_external_id:
+          type: string
+        crm_external_id:
+          type: string
+        last_synced_at:
+          type: string
+          format: date-time
+        last_event_id:
+          type: string
+          format: uuid
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              reason:
+                type: string
