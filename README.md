@@ -38,4 +38,4 @@
 
 ## Контакты
 
-GitHub: [Doomsday058](https://github.com/Doomsday058) · Email: fedorov.vlad22213@mail.ru
+GitHub: [doomsdayoff](https://github.com/doomsdayoff) · Email: fedorov.vlad22213@mail.ru
